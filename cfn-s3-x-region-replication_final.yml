@@ -1,0 +1,150 @@
+---
+Parameters:
+  RepRegion:
+    Type: String
+    AllowedValues:
+      - us-east-1
+      - us-east-2
+      - us-west-1
+      - us-west-2
+      - ca-central-1
+      - ap-south-1
+      - ap-northeast-2
+      - ap-southeast-1
+      - ap-southeast-2
+      - ap-northeast-1
+      - eu-central-1
+      - eu-west-1
+      - eu-west-2
+      - sa-east-1
+  ReplicationBucketName:
+    Type: String
+  OriginalBucketName:
+    Type: String
+
+Resources:
+  LambdaExecutionRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          -
+            Action:
+              - "sts:AssumeRole"
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+        Version: "2012-10-17"
+      Path: /
+      Policies:
+        -
+          PolicyDocument:
+            Statement:
+              -
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Effect: Allow
+                Resource: "arn:aws:logs:*:*:*"
+              -
+                Action:
+                  - "s3:*"
+                Effect: Allow
+                Resource: "*"
+            Version: "2012-10-17"
+          PolicyName: root
+    Type: "AWS::IAM::Role"
+  OriginalBucket:
+    DependsOn: TriggerLambda
+    Properties:
+      BucketName: !Ref OriginalBucketName
+      ReplicationConfiguration:
+        Role: !GetAtt S3Role.Arn
+        Rules:
+          -
+            Destination:
+              Bucket:
+                !Join
+                  - ""
+                  -
+                    - "arn:aws:s3:::"
+                    - !Ref ReplicationBucketName
+              StorageClass: STANDARD
+            Id: MyRule1
+            Prefix: ""
+            Status: Enabled
+      VersioningConfiguration:
+        Status: Enabled
+    Type: "AWS::S3::Bucket"
+  ReplicationBucket:
+    Properties:
+      Code:
+        ZipFile:
+          !Sub |
+            var aws = require('aws-sdk');
+            var response = require('cfn-response');
+            exports.handler = function(event, context, callback){
+                var s3 = new aws.S3({region: event.ResourceProperties.DestBucketRegion});
+                if (event.RequestType == 'Create' || event.RequestType == 'Update'){
+                    var bucketParams = {
+                        Bucket: event.ResourceProperties.DestBucketName,
+                    };
+                    s3.createBucket(bucketParams, function(err, data) {
+                        if (err){
+                            console.log(err, err.stack)
+                            response.send(event, context, response.FAILED, err)
+                        }
+                        else {
+                            console.log(data)
+                            var versioningParams = {
+                                Bucket: event.ResourceProperties.DestBucketName,
+                                VersioningConfiguration: {
+                                    Status: 'Enabled'
+                                }
+                            };
+                            s3.putBucketVersioning(versioningParams, function(err, data) {
+                                if (err) {
+                                    console.log(err, err.stack);
+                                }
+                                else {
+                                    console.log(data)
+                                    response.send(event, context, response.SUCCESS, {}, event.destBucketName);
+                                    callback(null,'Bucket created!');
+                                }
+                            });
+                        }
+                    });
+                }
+                else if (event.RequestType == 'Delete'){
+                    console.log('Please delete the ' + event.PhysicalResourceId + ' bucket.')
+                    response.send(event, context, response.SUCCESS, {}, event.PhysicalResourceId);
+                    callback(null);
+                }
+            };
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: nodejs8.10
+      Timeout: 30
+    Type: "AWS::Lambda::Function"
+  TriggerLambda:
+    Type: Custom::LambdaTrig
+    Properties:
+      ServiceToken: !GetAtt ReplicationBucket.Arn
+      DestBucketName: !Ref ReplicationBucketName
+      DestBucketRegion: !Ref RepRegion
+  S3Role:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          -
+            Action: "sts:AssumeRole"
+            Effect: Allow
+            Principal:
+              Service:
+                - s3.amazonaws.com
+        Version: "2012-10-17"
+      ManagedPolicyArns:
+        -  arn:aws:iam::aws:policy/AmazonS3FullAccess
+      Path: /
+    Type: "AWS::IAM::Role"
